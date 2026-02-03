@@ -3,8 +3,8 @@ import os
 import shutil
 import numpy as np
 from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog, QTableWidgetItem, QHeaderView
-from PyQt6.QtGui import QFileSystemModel, QKeyEvent 
-from PyQt6.QtCore import QUrl, QDir, QModelIndex, QItemSelection, Qt
+from PyQt6.QtGui import QFileSystemModel, QKeyEvent, QColor
+from PyQt6.QtCore import QUrl, QDir, QModelIndex, QItemSelection, Qt, QTimer
 from PyQt6.QtMultimedia import (QMediaPlayer, QAudioOutput, QAudioDecoder, 
                                  QAudioBuffer, QAudioFormat)
 from PyQt6 import uic
@@ -64,10 +64,14 @@ class AudioApp(QMainWindow):
     def on_selection_changed(self, selected: QItemSelection, deselected: QItemSelection) -> None:
         indexes = selected.indexes()
         if not indexes: return
+        
         path = self.model.filePath(indexes[0])
         if not os.path.isdir(path):
             _, ext = os.path.splitext(path.lower())
             if ext in self.supported_exts:
+                # Update the path immediately so it can be copied 
+                # even before decoding finishes
+                self.current_source_path = path 
                 self.load_and_play(path)
 
     def load_and_play(self, path: str) -> None:
@@ -105,13 +109,34 @@ class AudioApp(QMainWindow):
         try:
             filename = os.path.basename(self.current_source_path)
             dest = os.path.join(target_dir, filename)
+            
             if os.path.exists(dest):
                 self.statusbar.showMessage(f"Exists: {filename}", 2000)
+                self.flash_row(slot_index, QColor(255, 165, 0)) # Orange for "Already Exists"
             else:
                 shutil.copy2(self.current_source_path, dest)
                 self.statusbar.showMessage(f"Copied to Slot {slot_index+1}: {filename}", 2000)
+                self.flash_row(slot_index, QColor(0, 255, 100)) # Green for "Success"
         except Exception as e:
+            self.flash_row(slot_index, QColor(255, 50, 50)) # Red for "Error"
             self.statusbar.showMessage(f"Error: {e}", 5000)
+
+    def flash_row(self, row_index: int, color: QColor) -> None:
+        """Briefly changes the background color of a table row."""
+        for col in range(self.tableFolders.columnCount()):
+            item = self.tableFolders.item(row_index, col)
+            if item:
+                item.setBackground(color)
+        
+        # Reset color after 200ms
+        QTimer.singleShot(200, lambda: self.reset_row_color(row_index))
+
+    def reset_row_color(self, row_index: int) -> None:
+        for col in range(self.tableFolders.columnCount()):
+            item = self.tableFolders.item(row_index, col)
+            if item:
+                # Reset to default/transparent
+                item.setBackground(QColor(0, 0, 0, 0))
 
     def toggle_playback(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -130,12 +155,17 @@ class AudioApp(QMainWindow):
         if not a0: return
         key = a0.key()
         
-        # Keys 1-4 for multi-slot sorting
+        # 1. Check for Copy Keys (Independent of playback state)
         if Qt.Key.Key_1 <= key <= Qt.Key.Key_4:
             slot = key - Qt.Key.Key_1
             self.copy_to_slot(slot)
-        elif self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            return # Exit early so we don't trigger the "stop" logic below
+        
+        # 2. Check for Playback Interrupt (Only if playing)
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            # We treat any other key as a "Stop/Reset" command
             self.player.stop()
+            
         super().keyPressEvent(a0)
 
 if __name__ == "__main__":
