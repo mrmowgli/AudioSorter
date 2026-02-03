@@ -45,6 +45,8 @@ class AudioApp(QMainWindow):
         self.player.playbackStateChanged.connect(self._on_state_changed)
         self.player.mediaStatusChanged.connect(self._on_status_changed)
 
+        self.treeView.installEventFilter(self)
+
     def setup_folder_table(self):
         self.tableFolders.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.tableFolders.setEditTriggers(self.tableFolders.EditTrigger.NoEditTriggers)
@@ -62,16 +64,21 @@ class AudioApp(QMainWindow):
                 self.tableFolders.item(row, 1).setText(folder)
 
     def on_selection_changed(self, selected: QItemSelection, deselected: QItemSelection) -> None:
-        indexes = selected.indexes()
-        if not indexes: return
+        # Get the list of currently selected indexes
+        indexes = self.treeView.selectionModel().selectedIndexes()
+        if not indexes:
+            return
         
+        # The first index is usually the filename column
         path = self.model.filePath(indexes[0])
+        
         if not os.path.isdir(path):
             _, ext = os.path.splitext(path.lower())
             if ext in self.supported_exts:
-                # Update the path immediately so it can be copied 
-                # even before decoding finishes
+                # IMPORTANT: Update the path immediately here
                 self.current_source_path = path 
+                
+                # Now load the audio for preview
                 self.load_and_play(path)
 
     def load_and_play(self, path: str) -> None:
@@ -101,6 +108,15 @@ class AudioApp(QMainWindow):
         self.player.play()
 
     def copy_to_slot(self, slot_index: int) -> None:
+        # FALLBACK: If current_source_path is somehow empty, try to grab 
+        # whatever is currently highlighted in the treeView right now.
+        if not self.current_source_path:
+            indexes = self.treeView.selectionModel().selectedIndexes()
+            if indexes:
+                path = self.model.filePath(indexes[0])
+                if not os.path.isdir(path):
+                    self.current_source_path = path
+
         target_dir = self.tableFolders.item(slot_index, 1).text()
         if "None" in target_dir or not self.current_source_path:
             self.statusbar.showMessage("Error: Slot not configured!", 3000)
@@ -167,6 +183,21 @@ class AudioApp(QMainWindow):
             self.player.stop()
             
         super().keyPressEvent(a0)
+
+    def eventFilter(self, source, event):
+        # Check if the event is a key press and coming from the treeView
+        if event.type() == event.Type.KeyPress and source is self.treeView:
+            key = event.key()
+            
+            # If it's 1, 2, 3, or 4, trigger our copy logic
+            if Qt.Key.Key_1 <= key <= Qt.Key.Key_4:
+                slot = key - Qt.Key.Key_1
+                self.copy_to_slot(slot)
+                return True  # 'True' means "I handled this, don't let the treeView see it"
+                
+        # For all other keys (like Arrows), let the treeView handle them normally
+        return super().eventFilter(source, event)
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
