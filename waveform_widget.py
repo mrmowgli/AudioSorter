@@ -19,7 +19,8 @@ class WaveformWidget(QWidget):
         if self.samples.size == 0: return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor(25, 25, 30))
+        painter.fillRect(self.rect(), self.palette().color(self.palette().ColorRole.Window))
+        # painter.fillRect(self.rect(), QColor(25, 25, 30))
         
         w, h, mid_y = self.width(), self.height(), self.height() // 2
         painter.setPen(QPen(QColor(0, 255, 127), 1))
@@ -34,4 +35,3 @@ class WaveformWidget(QWidget):
                 int(x_axis[i+1]), int(mid_y - norm_samples[i+1])
             )
         painter.end()
-        

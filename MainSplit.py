@@ -2,22 +2,34 @@ import sys
 import os
 import shutil
 import numpy as np
-from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog, QTableWidgetItem, QHeaderView
+
+# QT Specific classes
+from PyQt6 import uic
+from PyQt6.QtCore import QUrl, QDir, QModelIndex, QItemSelection, Qt, QTimer, QSettings
 from PyQt6.QtGui import QFileSystemModel, QKeyEvent, QColor
-from PyQt6.QtCore import QUrl, QDir, QModelIndex, QItemSelection, Qt, QTimer
+from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog, QTableWidgetItem, QHeaderView
 from PyQt6.QtMultimedia import (QMediaPlayer, QAudioOutput, QAudioDecoder, 
                                  QAudioBuffer, QAudioFormat)
-from PyQt6 import uic
+
+# Theming, qnd qt_material needs to be installed by the user
+from qt_material import apply_stylesheet
+# Add this to your imports
+from level_meter import LevelMeter
 
 class AudioApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         uic.loadUi("player.ui", self)
 
+        # Initialize Settings (Org Name, App Name)
+        self.settings = QSettings("MyStudio", "AudioSorter")
+        self.apply_system_theme()
+
         # 1. Setup File System Explorer
         self.model = QFileSystemModel()
         self.model.setRootPath(QDir.homePath())
         self.supported_exts = {'.wav', '.ogg', '.aiff', '.mp3', '.mp4', '.m4a', '.flac'}
+        self.max_folders = 5
         self.model.setNameFilters([f"*{ext}" for ext in self.supported_exts])
         self.model.setNameFilterDisables(False)
 
@@ -28,6 +40,7 @@ class AudioApp(QMainWindow):
 
         # 2. Setup Folder Mapping Table
         self.setup_folder_table()
+        self.load_saved_configs() # Load paths after table is ready
 
         # 3. Multimedia Engine
         self.player = QMediaPlayer()
@@ -47,21 +60,39 @@ class AudioApp(QMainWindow):
 
         self.treeView.installEventFilter(self)
 
+    def apply_system_theme(self):
+        # There doesn't appear to be a way to reliably detect this
+        palette = self.palette()
+        # # Check if the system window color is dark
+        # is_dark = palette.color(palette.ColorRole.Window).lightness() < 128
+        
+        # if is_dark:
+        #     # If the system is dark, we ensure our custom Waveform 
+        #     # matches the background vibe
+        #     self.setStyleSheet("QMainWindow { background-color: #0e1e1e; }")
+        # else:
+        #     self.setStyleSheet("QMainWindow { background-color: #7e7e7e; }")
+        #     # self.setStyleSheet("QMainWindow { background-color: #f0f0f0; }")
+
     def setup_folder_table(self):
         self.tableFolders.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.tableFolders.setEditTriggers(self.tableFolders.EditTrigger.NoEditTriggers)
         
-        for i in range(4):
+        for i in range(self.max_folders):
             self.tableFolders.setItem(i, 0, QTableWidgetItem(f"Key {i+1}"))
             self.tableFolders.setItem(i, 1, QTableWidgetItem("None - Double click to set folder"))
         
         self.tableFolders.cellDoubleClicked.connect(self.set_row_folder)
+
 
     def set_row_folder(self, row, column):
         if column == 1:
             folder = QFileDialog.getExistingDirectory(self, f"Select Folder for Key {row+1}")
             if folder:
                 self.tableFolders.item(row, 1).setText(folder)
+                # Save immediately when changed
+                self.settings.setValue(f"slot_{row}", folder)
+                self.statusbar.showMessage(f"Saved Slot {row+1} configuration.", 2000)
 
     def on_selection_changed(self, selected: QItemSelection, deselected: QItemSelection) -> None:
         # Get the list of currently selected indexes
@@ -103,7 +134,18 @@ class AudioApp(QMainWindow):
 
     def _on_decoder_finished(self) -> None:
         if self.accumulated_data:
-            self.waveform.set_samples(np.concatenate(self.accumulated_data))
+            full_waveform = np.concatenate(self.accumulated_data)
+            self.waveform.set_samples(full_waveform)
+            
+            # Calculate Peak (Normalizing 0.0 to 1.0)
+            # For Int16, max is 32768. For Float, it's 1.0.
+            if full_waveform.dtype == np.int16:
+                peak = np.max(np.abs(full_waveform)) / 32768.0
+            else:
+                peak = np.max(np.abs(full_waveform))
+                
+            self.levelMeter.set_level(peak)
+    
         self.btnMain.setEnabled(True)
         self.player.play()
 
@@ -138,11 +180,15 @@ class AudioApp(QMainWindow):
             self.statusbar.showMessage(f"Error: {e}", 5000)
 
     def flash_row(self, row_index: int, color: QColor) -> None:
-        """Briefly changes the background color of a table row."""
+        """Briefly changes the background color of a table row, forcing it past the theme."""
         for col in range(self.tableFolders.columnCount()):
             item = self.tableFolders.item(row_index, col)
             if item:
-                item.setBackground(color)
+                # Using DataRole bypasses some stylesheet restrictions
+                item.setData(Qt.ItemDataRole.BackgroundRole, color)
+        
+        # Force the UI to render the change immediately
+        self.tableFolders.viewport().update()
         
         # Reset color after 200ms
         QTimer.singleShot(200, lambda: self.reset_row_color(row_index))
@@ -151,8 +197,26 @@ class AudioApp(QMainWindow):
         for col in range(self.tableFolders.columnCount()):
             item = self.tableFolders.item(row_index, col)
             if item:
-                # Reset to default/transparent
-                item.setBackground(QColor(0, 0, 0, 0))
+                # Setting to None allows the Material Theme to take back control
+                item.setData(Qt.ItemDataRole.BackgroundRole, None)
+        self.tableFolders.viewport().update()
+
+    # def flash_row(self, row_index: int, color: QColor) -> None:
+    #     """Briefly changes the background color of a table row."""
+    #     for col in range(self.tableFolders.columnCount()):
+    #         item = self.tableFolders.item(row_index, col)
+    #         if item:
+    #             item.setBackground(color)
+        
+    #     # Reset color after 200ms
+    #     QTimer.singleShot(200, lambda: self.reset_row_color(row_index))
+
+    # def reset_row_color(self, row_index: int) -> None:
+    #     for col in range(self.tableFolders.columnCount()):
+    #         item = self.tableFolders.item(row_index, col)
+    #         if item:
+    #             # Reset to default/transparent
+    #             item.setBackground(QColor(0, 0, 0, 0))
 
     def toggle_playback(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -172,7 +236,7 @@ class AudioApp(QMainWindow):
         key = a0.key()
         
         # 1. Check for Copy Keys (Independent of playback state)
-        if Qt.Key.Key_1 <= key <= Qt.Key.Key_4:
+        if Qt.Key.Key_1 <= key <= Qt.Key.Key_5:
             slot = key - Qt.Key.Key_1
             self.copy_to_slot(slot)
             return # Exit early so we don't trigger the "stop" logic below
@@ -190,7 +254,7 @@ class AudioApp(QMainWindow):
             key = event.key()
             
             # If it's 1, 2, 3, or 4, trigger our copy logic
-            if Qt.Key.Key_1 <= key <= Qt.Key.Key_4:
+            if Qt.Key.Key_1 <= key <= Qt.Key.Key_5:
                 slot = key - Qt.Key.Key_1
                 self.copy_to_slot(slot)
                 return True  # 'True' means "I handled this, don't let the treeView see it"
@@ -198,9 +262,22 @@ class AudioApp(QMainWindow):
         # For all other keys (like Arrows), let the treeView handle them normally
         return super().eventFilter(source, event)
 
+    def load_saved_configs(self):
+        """Retrieves paths from previous sessions."""
+        for i in range(self.max_folders):
+            saved_path = self.settings.value(f"slot_{i}", "")
+            if saved_path and os.path.exists(saved_path):
+                self.tableFolders.item(i, 1).setText(saved_path)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = AudioApp()
+    
+    # This forces Qt to use the system's theme-aware palette
+    #app.setStyle("Fusion") # Fusion is the most flexible for dark/light switching
+
+    # Inside your if __name__ == "__main__":
+    apply_stylesheet(app, theme='dark_teal.xml')
+
     window.show()
     sys.exit(app.exec())
