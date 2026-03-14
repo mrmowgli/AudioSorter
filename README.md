@@ -1,6 +1,6 @@
 # AudioSorter ⚡
 
-![[https://github.com/mrmowgli/AudioSorter/blob/master/AudioSorter_Screenshot.png]]
+![Screenshot](https://github.com/mrmowgli/AudioSorter/blob/master/AudioSorter_Screenshot.png)
 
 **AudioSorter** is a high-speed utility designed for sound designers, musicians, and foley artists who need to audition and organize large libraries of audio samples rapidly. Built with Python 3.14, PyQt6, and NumPy, it focuses on a "one-key" workflow to move files into categorized folders.
 
