@@ -70,7 +70,55 @@
     </item>
    </layout>
   </widget>
+  <widget class="QMenuBar" name="menubar">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>1100</width>
+     <height>24</height>
+    </rect>
+   </property>
+   <widget class="QMenu" name="menu_File">
+    <property name="title">
+     <string>&amp;File</string>
+    </property>
+    <addaction name="action_Open_Folder"/>
+    <addaction name="separator"/>
+    <addaction name="action_Preferences"/>
+    <addaction name="separator"/>
+    <addaction name="actionE_xit"/>
+   </widget>
+   <widget class="QMenu" name="menuAbout">
+    <property name="title">
+     <string>&amp;About</string>
+    </property>
+    <addaction name="actionAbout_Sound_Organizer"/>
+   </widget>
+   <addaction name="menu_File"/>
+   <addaction name="menuAbout"/>
+  </widget>
   <widget class="QStatusBar" name="statusbar"/>
+  <action name="action_Open_Folder">
+   <property name="text">
+    <string>&amp;Open Folder</string>
+   </property>
+  </action>
+  <action name="action_Preferences">
+   <property name="text">
+    <string>&amp;Preferences</string>
+   </property>
+  </action>
+  <action name="actionAbout_Sound_Organizer">
+   <property name="text">
+    <string>A&amp;bout Sound Organizer</string>
+   </property>
+  </action>
+  <action name="actionE_xit">
+   <property name="text">
+    <string>E&amp;xit</string>
+   </property>
+  </action>
  </widget>
     <customwidgets>
       <customwidget>
@@ -87,3 +135,4 @@
  <resources/>
  <connections/>
 </ui>
+

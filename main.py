@@ -19,10 +19,10 @@ from level_meter import LevelMeter
 class AudioApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        uic.loadUi("player.ui", self)
+        uic.loadUi("AudioSorter.ui", self)
 
         # Initialize Settings (Org Name, App Name)
-        self.settings = QSettings("MyStudio", "AudioSorter")
+        self.settings = QSettings("AndNinjas", "AudioSorter")
         self.apply_system_theme()
 
         # 1. Setup File System Explorer
