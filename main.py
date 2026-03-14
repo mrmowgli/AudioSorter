@@ -5,14 +5,24 @@ import numpy as np
 
 from PyQt6 import uic
 from PyQt6.QtCore import QUrl, QDir, QModelIndex, QItemSelection, Qt, QTimer, QSettings
-from PyQt6.QtGui import QFileSystemModel, QKeyEvent, QColor
+from PyQt6.QtGui import QFileSystemModel, QKeyEvent, QColor, QIcon
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QFileDialog, QTableWidgetItem, 
-                             QHeaderView, QDialog, QVBoxLayout, QLabel, QDialogButtonBox)
+                             QHeaderView, QDialog, QVBoxLayout, QLabel, QDialogButtonBox, QPushButton)
 from PyQt6.QtMultimedia import (QMediaPlayer, QAudioOutput, QAudioDecoder, 
                                  QAudioBuffer, QAudioFormat)
 
 from qt_material import apply_stylesheet
 from level_meter import LevelMeter
+
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
 
 # --- New Preferences Dialog Class ---
 class PreferencesDialog(QDialog):
@@ -36,7 +46,7 @@ class PreferencesDialog(QDialog):
 class AudioApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        uic.loadUi("AudioSorter.ui", self)
+        uic.loadUi(resource_path("AudioSorter.ui"), self)
 
         self.settings = QSettings("AndNinjas", "AudioSorter")
         self.apply_system_theme()
@@ -92,6 +102,8 @@ class AudioApp(QMainWindow):
 
         self.treeView.installEventFilter(self)
 
+        self.meter_smooth_value = 0.0
+
     # --- Menu Implementation Methods ---
 
     def menu_open_folder(self):
@@ -102,11 +114,17 @@ class AudioApp(QMainWindow):
             self.statusbar.showMessage(f"Navigated to: {folder}", 3000)
 
     def menu_show_preferences(self):
-        """Launches the preferences dialog."""
-        dialog = PreferencesDialog(self)
+        """Launches preferences and saves the new root path."""
+        current_root = self.settings.value("browser_root", QDir.homePath())
+        dialog = PreferencesDialog(current_root, self)
+        
         if dialog.exec():
-            # Handle logic if user pressed "OK"
-            self.statusbar.showMessage("Preferences updated.", 2000)
+            new_path = dialog.selected_path
+            self.settings.setValue("browser_root", new_path)
+            
+            # Apply immediately to the tree view
+            self.treeView.setRootIndex(self.model.index(new_path))
+            self.statusbar.showMessage("Default folder updated.", 2000)
 
     def menu_show_about(self):
         """Simple info message."""
@@ -129,11 +147,13 @@ class AudioApp(QMainWindow):
         self.tableFolders.cellDoubleClicked.connect(self.set_row_folder)
 
     def set_row_folder(self, row, column):
+        """Modified to ensure QSettings saves immediately when a slot changes."""
         if column == 1:
             folder = QFileDialog.getExistingDirectory(self, f"Select Folder for Key {row+1}")
             if folder:
                 self.tableFolders.item(row, 1).setText(folder)
                 self.settings.setValue(f"slot_{row}", folder)
+                self.settings.sync() # Force write to disk
                 self.statusbar.showMessage(f"Saved Slot {row+1} configuration.", 2000)
 
     def on_selection_changed(self, selected: QItemSelection, deselected: QItemSelection) -> None:
@@ -164,18 +184,35 @@ class AudioApp(QMainWindow):
         else:
             self.meter_timer.stop()
             self.levelMeter.set_level(0) # Reset meter on stop
- 
+
     def update_live_meter(self):
-        # QMediaPlayer doesn't expose raw samples easily during playback
-        # but it does expose a 'volume' property. 
-        # For true sample-based metering, we'd use a Probe, 
-        # but for now, let's sync it to the player's peak output.
+        """Syncs the LevelMeter with log scaling and gravity."""
+        if not hasattr(self, 'volume_profile') or not self.volume_profile:
+            return
+
+        pos_ms = self.player.position()
+        frame_index = int(pos_ms / 20)
         
-        # If your LevelMeter expects 0.0-1.0:
-        # Note: Qt Multimedia 6.x metering requires a QAudioProbe 
-        # or custom output. As a reliable shortcut for this app:
-        level = self.audio_output.volume() 
-        self.levelMeter.set_level(level)
+        target_level = 0.0
+        if frame_index < len(self.volume_profile):
+            rms = self.volume_profile[frame_index]
+            
+            # 1. Convert RMS to dBFS (Decibels relative to Full Scale)
+            # -60dB is basically silence, 0dB is clipping
+            db = 20 * np.log10(rms + 1e-6) 
+            
+            # 2. Map -60dB...0dB to 0.0...1.0 for the UI
+            # This makes "quiet" sounds actually show up on the bar
+            target_level = max(0, (db + 60) / 60)
+
+        # Apply "Gravity" (Smoothing)
+        # If the new level is higher, jump to it. If lower, drift down slowly.
+        if target_level > self.meter_smooth_value:
+            self.meter_smooth_value = target_level
+        else:
+            self.meter_smooth_value *= 0.95 # Decay factor
+
+        self.levelMeter.set_level(self.meter_smooth_value)
 
     def _process_buffer(self) -> None:
         buf: QAudioBuffer = self.decoder.read()
@@ -192,61 +229,67 @@ class AudioApp(QMainWindow):
         self.accumulated_data.append(data[::ch] if ch > 1 else data)
 
     def _on_decoder_finished(self) -> None:
-        if self.accumulated_data:
-            full_waveform = np.concatenate(self.accumulated_data)
+        """Handles post-decoding UI updates and starts playback."""
+        if not self.accumulated_data:
+            self.btnMain.setEnabled(True)
+            self.btnMain.setText("Play Selection")
+            return
+
+        full_waveform = np.concatenate(self.accumulated_data)
+
+        # Normalize the waveform if it's int16 so calculations are consistent
+        if full_waveform.dtype == np.int16:
+            full_waveform = full_waveform.astype(np.float32) / 32768.0
+
+        # Calculate frames
+        frame_size = int(self.current_sample_rate * 0.02) 
+        self.volume_profile = []
+        
+        if frame_size > 0:
+            for i in range(0, len(full_waveform), frame_size):
+                chunk = full_waveform[i : i + frame_size]
+                if len(chunk) == 0: continue
+                # RMS calculation
+                rms = np.sqrt(np.mean(chunk**2))
+                self.volume_profile.append(rms)
+        
+        # Update Waveform widget
+        if hasattr(self, 'waveform'):
             self.waveform.set_samples(full_waveform)
 
+        # Calculate Peak
+        peak = np.max(np.abs(full_waveform))
+        if full_waveform.dtype == np.int16:
+            peak /= 32768.0
+        
+        self.levelMeter.set_level(peak)
+        db = 20 * np.log10(max(peak, 1e-5)) if peak > 0 else -100.0
 
-            peak = np.max(np.abs(full_waveform))
-            if full_waveform.dtype == np.int16:
-                peak /= 32768.0
-            
+        # Time Calculations
+        sample_rate = self.current_sample_rate if self.current_sample_rate > 0 else 44100
+        sample_count = len(full_waveform)
+        total_seconds = sample_count / sample_rate
+        
+        minutes = int(total_seconds // 60)
+        seconds = int(total_seconds % 60)
+        centiseconds = int((total_seconds % 1) * 100)
+        length_str = f"{minutes}'{seconds:02d}\"{centiseconds:02d}"
 
-            self.levelMeter.set_level(peak)
+        codec = os.path.splitext(self.current_source_path)[1][1:].upper()
+        
+        # UI Update logic
+        stats_text = (f"Samples: {sample_count} | Rate: {sample_rate} | "
+                      f"Codec: {codec} | Length: {length_str} | Peak: {db:.1f} dB")
+        
+        if hasattr(self, 'lblStats'):
+            self.lblStats.setText(stats_text)
+        else:
+            self.statusbar.showMessage(stats_text)
 
-            # Convert peak to Decibels (dBFS)
-            # We use 1e-5 to avoid log10(0) errors
-            db = 20 * np.log10(max(peak, 1e-5)) if peak > 0 else -100.0
-            
-            # --- 2. Metadata Extraction ---
-            fmt = self.decoder.audioFormat()
-            
-            # --- 2. Accurate Time Calculation ---
-            # Total seconds = total samples / samples per second
-            # Use the rate we captured during processing
-            sample_rate = self.current_sample_rate if self.current_sample_rate > 0 else 44100
-            sample_count = len(full_waveform)
-            total_seconds = sample_count / sample_rate if (sample_count and sample_rate) else 0
-            
-            minutes = int(total_seconds // 60)
-            seconds = int(total_seconds % 60)
-            # Calculate "centiseconds" (1/100th of a second) for the " format
-            centiseconds = int((total_seconds % 1) * 100)
-            
-            length_str = f"{minutes}'{seconds:02d}\"{centiseconds:02d}"
-
-            codec = os.path.splitext(self.current_source_path)[1][1:].upper()
-            bit_depth = "32-bit Float" if fmt.sampleFormat() == QAudioFormat.SampleFormat.Float else "16-bit Int"
-
-            # --- 3. Update the UI ---
-            stats_text = (
-                f"Samples: {sample_count} | "
-                f"Samplerate: {self.current_sample_rate} | "
-                f"Format: {bit_depth} | "
-                f"Codec: {codec} | "
-                f"Length: {length_str} | "
-                f"Peak: {db:.1f} dB"
-            )
-            
-            # Assuming you add a QLabel named 'lblStats' to your UI
-            if hasattr(self, 'lblStats'):
-                self.lblStats.setText(stats_text)
-            else:
-                # Fallback to status bar if the label isn't in the .ui yet
-                # self.statusbar.showMessage(f"Loaded: {length_str} | {db:.1f} dB")
-                self.statusbar.showMessage(f"{stats_text}")
         self.btnMain.setEnabled(True)
-        self.player.play()
+        # Only auto-play if the player isn't already playing
+        if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+            self.player.play()
 
     def copy_to_slot(self, slot_index: int) -> None:
         if not self.current_source_path:
@@ -275,20 +318,25 @@ class AudioApp(QMainWindow):
             self.flash_row(slot_index, QColor(255, 50, 50))
             self.statusbar.showMessage(f"Error: {e}", 5000)
 
-    def flash_row(self, row_index: int, color: QColor) -> None:
-        for col in range(self.tableFolders.columnCount()):
-            item = self.tableFolders.item(row_index, col)
-            if item:
-                item.setData(Qt.ItemDataRole.BackgroundRole, color)
-        self.tableFolders.viewport().update()
-        QTimer.singleShot(200, lambda: self.reset_row_color(row_index))
+    def flash_row(self, row_index: int, color: QColor):
+        # Save the current selection behavior
+        old_palette = self.tableFolders.palette()
+        
+        # Create a palette with the flash color as the Highlight
+        new_palette = self.tableFolders.palette()
+        new_palette.setColor(self.tableFolders.palette().ColorGroup.All, 
+                             self.tableFolders.palette().ColorRole.Highlight, color)
+        
+        self.tableFolders.setPalette(new_palette)
+        self.tableFolders.selectRow(row_index)
+        
+        # Reset after 200ms
+        QTimer.singleShot(200, lambda: self.tableFolders.setPalette(old_palette))
+        QTimer.singleShot(200, lambda: self.tableFolders.clearSelection())
 
-    def reset_row_color(self, row_index: int) -> None:
-        for col in range(self.tableFolders.columnCount()):
-            item = self.tableFolders.item(row_index, col)
-            if item:
-                item.setData(Qt.ItemDataRole.BackgroundRole, None)
-        self.tableFolders.viewport().update()
+    def reset_row_color(self) -> None:
+        # Clearing the stylesheet returns it to the 'qt-material' default
+        self.tableFolders.setStyleSheet("")
 
     def toggle_playback(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -324,14 +372,71 @@ class AudioApp(QMainWindow):
         return super().eventFilter(source, event)
 
     def load_saved_configs(self):
+        """Restores the browser root and the 5 destination slots."""
+        # 1. Restore Browser Root
+        default_root = self.settings.value("browser_root", QDir.homePath())
+        if os.path.exists(default_root):
+            self.treeView.setRootIndex(self.model.index(default_root))
+        
+        # 2. Restore Destination Slots
         for i in range(self.max_folders):
             saved_path = self.settings.value(f"slot_{i}", "")
-            if saved_path and os.path.exists(saved_path):
-                self.tableFolders.item(i, 1).setText(saved_path)
+            item = self.tableFolders.item(i, 1)
+            # Ensure path exists and item is valid before setting
+            if item and saved_path and os.path.exists(str(saved_path)):
+                item.setText(str(saved_path))
+            elif item:
+                item.setText("None - Double click to set folder")
+
+
+class PreferencesDialog(QDialog):
+    def __init__(self, current_root, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Preferences")
+        self.setMinimumWidth(400)
+        
+        layout = QVBoxLayout(self)
+        
+        # Section 1: Default Browser Path
+        self.group_label = QLabel("<b>File Browser Settings</b>")
+        layout.addWidget(self.group_label)
+        
+        self.path_display = QLabel(f"Current Start Folder:\n{current_root}")
+        self.path_display.setWordWrap(True)
+        self.path_display.setStyleSheet("color: #888; padding: 5px;")
+        layout.addWidget(self.path_display)
+        
+        self.btn_browse = QPushButton("Change Default Start Folder")
+        self.btn_browse.clicked.connect(self.pick_folder)
+        layout.addWidget(self.btn_browse)
+
+        layout.addSpacing(20) # Visual gap
+        
+        # Section 2: Instructions
+        self.info_label = QLabel("<i>Note: Destination slots are saved automatically when changed in the main table.</i>")
+        self.info_label.setWordWrap(True)
+        layout.addWidget(self.info_label)
+        
+        # Buttons
+        self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
+        
+        self.selected_path = current_root
+
+    def pick_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Default Directory", self.selected_path)
+        if folder:
+            self.selected_path = folder
+            self.path_display.setText(f"Current Start Folder:\n{folder}")
+
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon("audiosorter.png"))
     window = AudioApp()
-    apply_stylesheet(app, theme='dark_teal.xml')
+    apply_stylesheet(app, theme=resource_path('dark_teal.xml'))
     window.show()
     sys.exit(app.exec())
