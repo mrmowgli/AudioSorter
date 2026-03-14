@@ -1,5 +1,36 @@
 import sys
+import importlib.util
 import os
+
+def check_dependencies():
+    """Checks for required packages before launching the main app logic."""
+    required = {
+        "PyQt6": "UI Framework",
+        "numpy": "Audio Processing",
+        "qt_material": "Theme Engine"
+    }
+    
+    missing = []
+    for pkg, purpose in required.items():
+        if importlib.util.find_spec(pkg) is None:
+            missing.append(f"• {pkg} ({purpose})")
+            
+    if missing:
+        # We try to use a basic message box if PyQt6 is available, 
+        # otherwise we fallback to terminal.
+        error_msg = "Missing required dependencies:\n\n" + "\n".join(missing)
+        print(f"CRITICAL ERROR:\n{error_msg}")
+        
+        try:
+            from PyQt6.QtWidgets import QApplication, QMessageBox
+            app = QApplication(sys.argv)
+            QMessageBox.critical(None, "Startup Error", error_msg)
+        except ImportError:
+            pass
+        sys.exit(1)
+
+check_dependencies()
+
 import shutil
 import numpy as np
 
